@@ -1,0 +1,5 @@
+Hello hassan this is test .
+Hassan?
+cat
+ls
+ls -a all

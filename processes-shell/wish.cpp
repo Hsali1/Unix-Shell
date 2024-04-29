@@ -1,0 +1,385 @@
+#include <stdlib.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <fcntl.h>
+#include <fstream>
+#include <iostream>
+#include <unistd.h>
+#include <string>
+#include <cstring>
+#include <vector>
+#include <algorithm>
+#include <cctype>
+
+using namespace std;
+/*
+#define DEFAULT_PATH "/bin"
+*/
+
+std::vector<std::string> path_container = {"/bin", "/usr/bin"};
+
+// Function to trim leading whitespace from a string
+std::string ltrim(const std::string &s);
+// Function to trim trailing whitespace from a string
+std::string rtrim(const std::string &s);
+// Function to trim trailing whitespace from a string
+std::string trim(const std::string &s);
+// Function to print error messages
+void error_message();
+
+void process_each_token(std::vector<std::string> &tokens)
+{
+
+  bool error_occurred = false;
+
+  // check if the command has any arguments
+  if (tokens.empty())
+  {
+    return;
+  }
+
+  // create a vector or vectors, and set each command as a vector
+  std::vector<std::vector<std::string>> commands;
+
+  // push empty vector into commands, this will be the first command
+  commands.push_back(std::vector<std::string>());
+
+  for (auto &token : tokens)
+  {
+    if (token == "&")
+    {
+      // If token is &, it means the next string will be a new command
+      if (commands.back().empty())
+      {
+        return;
+      }
+      commands.push_back(std::vector<std::string>());
+    }
+    else if (token == ">")
+    {
+      // If > is encountered at the end of the token, it's an error
+      if (token.size() == 1)
+      {
+        // Error: Redirection operator '>' found without output filename
+        error_message();
+        error_occurred = true;
+        break;
+      }
+    }
+    else if (token.find('>') != std::string::npos)
+    {
+      // If token contains '>', split it into command and output file
+      size_t pos = token.find('>');
+      if (pos == 0)
+      {
+        // Error: Redirection operator '>' found without command before it
+        error_message();
+        error_occurred = true;
+        break;
+      }
+      if (pos == token.size() - 1)
+      {
+        // Error: Redirection operator '>' found without output filename after it
+        error_message();
+        error_occurred = true;
+        break;
+      }
+      if (pos != token.rfind('>'))
+      {
+        // Error: Multiple redirection operators '>' found
+        error_message();
+        error_occurred = true;
+        break;
+      }
+      commands.back().push_back(token.substr(0, pos)); // Command
+      commands.back().push_back(">");
+      commands.back().push_back(token.substr(pos + 1)); // Output file
+    }
+    else
+    {
+      // If token is not &, it means the next token is an argument
+      // We append it to the vector
+      commands.back().push_back(token);
+    }
+  }
+
+  // once we get all the commands and seperate them by vectors
+  // we will process each command.
+
+  for (size_t i = 0; i < commands.size(); i++)
+  {
+    auto &command = commands[i];
+    if (command.empty())
+    {
+      continue;
+    }
+    // Need to check for redirection
+    // std::find returns iterator to first instance of thing
+    std::string output_file;
+    auto it = std::find(command.begin(), command.end(), ">");
+
+    if (it != command.end())
+    {
+      // Check for multiple redirection operators
+      if (std::count(command.begin(), command.end(), ">") > 1)
+      {
+        error_message();
+        error_occurred = true;
+        break;
+      }
+      // Check for multiple filenames to the right of the redirection operator
+      if (std::distance(it, command.end()) > 2)
+      {
+        error_message();
+        error_occurred = true;
+        break;
+      }
+      // Extract the output filename
+      if (std::next(it) != command.end())
+      {
+        output_file = *std::next(it);
+        command.erase(it, std::next(it, 2));
+      }
+      else
+      {
+        // Error: Redirection operator '>' found without output filename
+        error_message();
+        error_occurred = true;
+        break;
+      }
+    }
+
+    if ((!command.empty()) && command[0] == "cd")
+    {
+      if (command.size() != 2)
+      {
+        error_message();
+      }
+      else
+      {
+        if (chdir(command[1].c_str()) != 0)
+        {
+          error_message();
+        }
+      }
+    }
+    else if ((!command.empty()) && command[0] == "exit")
+    {
+      if (command.size() == 1)
+      {
+        exit(0);
+      }
+      else
+      {
+        error_message();
+      }
+    }
+    else if ((!command.empty()) && command[0] == "path")
+    {
+      // The path command always overwrites the old path with the newly specified path.
+      path_container.clear();
+      for (size_t i = 1; i < command.size(); i++)
+      {
+        path_container.push_back(command[i]);
+      }
+    }
+    else
+    {
+      // Check if the command is executable
+      std::string executable_path;
+      for (const auto &path : path_container)
+      {
+        if ((!command.empty()))
+        {
+          executable_path = path + "/" + command[0];
+          if (access(executable_path.c_str(), X_OK) == 0)
+          {
+            break; // Found executable
+          }
+        }
+      }
+
+      if (!error_occurred)
+      {
+        int original_stdout = dup(STDOUT_FILENO);
+        int original_stderr = dup(STDERR_FILENO);
+
+        if (!executable_path.empty())
+        {
+          // This is where we will redirect command output
+          // Construct the full output path
+          // This is where we will redirect command output
+          if (!output_file.empty())
+          {
+            int new_fd = open(output_file.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (new_fd == -1)
+            {
+              error_message();
+              continue;
+            }
+
+            dup2(new_fd, STDOUT_FILENO);
+            dup2(new_fd, STDERR_FILENO);
+            close(new_fd);
+          }
+
+          // Execute the command
+          int ret = fork();
+          if (ret == 0)
+          {
+            // Child process
+            std::vector<const char *> args;
+            for (const auto &arg : command)
+            {
+              args.push_back(arg.c_str());
+            }
+            args.push_back(nullptr); // Null-terminate the array
+            execv(executable_path.c_str(), const_cast<char *const *>(args.data()));
+            // If execv returns, an error occurred
+            error_message();
+            exit(1); // Exit the child process
+          }
+          else if (ret < 0)
+          {
+            // Fork failed
+            error_message();
+          }
+          else
+          {
+            // Parent process
+            wait(nullptr);
+          }
+        }
+        else
+        {
+          // Command not found
+          // cout << "250" << endl;
+          error_message();
+        }
+
+        // Restore the original file descriptors
+        dup2(original_stdout, STDOUT_FILENO);
+        dup2(original_stderr, STDERR_FILENO);
+        close(original_stdout);
+        close(original_stderr);
+      }
+    }
+  }
+}
+
+void break_the_line(std::string line, std::vector<std::string> &tokens)
+{
+  std::string delimiter = " ";
+
+  size_t position = 0;
+  std::string token;
+  while ((position = line.find(delimiter)) != std::string::npos)
+  {
+    token = line.substr(0, position);
+    // Check if the token is a redirection operator
+    if (token == ">")
+    {
+      // If > is encountered, add it as a separate token
+      tokens.push_back(">");
+    }
+    else
+    {
+      // Add the token to the tokens vector
+      tokens.push_back(token);
+    }
+    line.erase(0, position + delimiter.length());
+  }
+  // Add the last token
+  if (!line.empty())
+  {
+    tokens.push_back(line);
+  }
+  if ((!tokens.empty()) && tokens[0] == ">")
+  {
+    error_message();
+  }
+  else
+  {
+    process_each_token(tokens);
+  }
+}
+
+int main(int argc, char *argv[])
+{
+
+  // modifyPath(DEFAULT_PATH);
+
+  if (argc > 2)
+  {
+    error_message();
+    exit(1);
+  }
+
+  std::ifstream file;
+  std::string line;
+
+  // if file is provided
+  if (argc > 1)
+  {
+    file.open(argv[1]);
+    // process the file line by line
+    if (!file.is_open())
+    {
+      error_message();
+      exit(1);
+    }
+    while (getline(file, line))
+    {
+
+      // break line up into seperate commands
+      std::vector<std::string> tokens;
+
+      std::string trimmed_line = trim(line);
+
+      break_the_line(trimmed_line, tokens);
+    }
+
+    file.close();
+  }
+  else
+  {
+    // else if file is not provided get line from standard input
+    while (true)
+    {
+      std::cout << "wish> ";
+      getline(std::cin, line);
+      // break line up into seperate commands
+      std::vector<std::string> tokens;
+      break_the_line(line, tokens);
+    }
+  }
+
+  return 0;
+}
+
+// Function to trim leading whitespace from a string
+std::string ltrim(const std::string &s)
+{
+  size_t start = s.find_first_not_of(" \t\n\r\f\v");
+  return (start == std::string::npos) ? "" : s.substr(start);
+}
+
+// Function to trim trailing whitespace from a string
+std::string rtrim(const std::string &s)
+{
+  size_t end = s.find_last_not_of(" \t\n\r\f\v");
+  return (end == std::string::npos) ? "" : s.substr(0, end + 1);
+}
+
+// Function to trim leading and trailing whitespace from a string
+std::string trim(const std::string &s)
+{
+  return rtrim(ltrim(s));
+}
+
+void error_message()
+{
+  char error_message[30] = "An error has occurred\n";
+  write(STDERR_FILENO, error_message, strlen(error_message));
+}
